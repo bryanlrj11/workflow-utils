@@ -1,0 +1,89 @@
+name: daily
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+    inputs:
+      probe:
+        type: boolean
+        default: false
+      scope:
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: collector
+  cancel-in-progress: false
+
+jobs:
+  run:
+    if: github.event_name == 'workflow_dispatch' || vars.DAILY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Start at a varied time
+        if: github.event_name == 'schedule'
+        run: sleep $((RANDOM % 600))
+
+      - uses: actions/checkout@v4
+
+      - name: Fetch
+        env:
+          DEPLOY_KEY: ${{ secrets.SOURCE_KEY }}
+        run: bash scripts/fetch.sh "${{ secrets.SOURCE_REPO }}" src a
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: src/deploy/jobs/a.txt
+
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: src/data/live
+          key: state-${{ github.run_id }}
+          restore-keys: state-
+
+      - name: Run
+        working-directory: src
+        env:
+          COCKROACH_DSN: ${{ secrets.COCKROACH_DSN }}
+          PAID_PROXIES: ${{ secrets.PROXIES }}
+          BUNDLE_KEY: ${{ secrets.BUNDLE_KEY }}
+          BUNDLE_OUT: ${{ runner.temp }}/bundle.bin
+          PROBE_ONLY: ${{ inputs.probe }}
+          LEAGUES: ${{ inputs.scope }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          if bash deploy/jobs/daily.sh > "$RUNNER_TEMP/run.log" 2>&1; then
+            echo "ok"
+          else
+            echo "failed ($?)"
+            exit 1
+          fi
+
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: src/data/live
+          key: state-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Keep output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle
+          path: ${{ runner.temp }}/bundle.bin
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Report
+        if: failure()
+        env:
+          DEPLOY_KEY: ${{ secrets.LOGS_KEY }}
+        run: bash scripts/report.sh "${{ secrets.LOGS_REPO }}" "$RUNNER_TEMP/run.log"

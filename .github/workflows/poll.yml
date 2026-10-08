@@ -1,0 +1,60 @@
+name: poll
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      window:
+        default: "25"
+      extra:
+        type: choice
+        options: [auto, "yes", "no"]
+        default: auto
+
+permissions:
+  contents: read
+
+concurrency:
+  group: poll
+  cancel-in-progress: false
+
+jobs:
+  run:
+    if: github.event_name == 'workflow_dispatch' || vars.POLL_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch
+        env:
+          DEPLOY_KEY: ${{ secrets.SOURCE_KEY }}
+        run: bash scripts/fetch.sh "${{ secrets.SOURCE_REPO }}" src b
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: src/deploy/jobs/b.txt
+
+      - name: Run
+        working-directory: src
+        env:
+          COCKROACH_DSN: ${{ secrets.COCKROACH_DSN }}
+          WATCH_MINUTES: ${{ inputs.window || '25' }}
+          OUTRIGHTS: ${{ inputs.extra || 'auto' }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          if bash deploy/jobs/poll.sh > "$RUNNER_TEMP/run.log" 2>&1; then
+            echo "ok"
+          else
+            echo "failed ($?)"
+            exit 1
+          fi
+
+      - name: Report
+        if: failure()
+        env:
+          DEPLOY_KEY: ${{ secrets.LOGS_KEY }}
+        run: bash scripts/report.sh "${{ secrets.LOGS_REPO }}" "$RUNNER_TEMP/run.log"
