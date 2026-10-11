@@ -4,6 +4,9 @@ on:
   schedule:
     - cron: "7,37 * * * *"
   workflow_dispatch:
+    inputs:
+      source:
+        default: ""
 
 permissions:
   contents: read
@@ -13,8 +16,31 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  gate:
+    # GitHub's cron is the backup for the timer (deploy/trigger in the source repo): a
+    # scheduled run goes ahead only when no other run of this workflow started recently.
+    if: github.event_name == 'schedule' && vars.CHECK_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    outputs:
+      go: ${{ steps.recent.outputs.go }}
+    steps:
+      - id: recent
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          since=$(date -u -d '-25 minutes' +%Y-%m-%dT%H:%M:%SZ)
+          n=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/check.yml/runs?created=%3E$since" -q "[.workflow_runs[] | select(.id != $GITHUB_RUN_ID)] | length" || echo 0)
+          echo "go=$([ "$n" -eq 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
   run:
-    if: github.event_name == 'workflow_dispatch' || vars.CHECK_ENABLED == 'true'
+    needs: gate
+    # manual dispatch always; the timer and the backup cron only while CHECK_ENABLED is true
+    if: >-
+      always() && (needs.gate.outputs.go == 'true'
+      || (github.event_name == 'workflow_dispatch' && (inputs.source != 'timer' || vars.CHECK_ENABLED == 'true')))
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
