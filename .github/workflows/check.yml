@@ -11,8 +11,12 @@ on:
 permissions:
   contents: read
 
+# Its own queue, like poll: a daily run holds "collector" for up to an hour and a half, and a queued check
+# there is replaced by the next one, so lineups were not fetched while it ran. The cost is that a check
+# can save the cached state while a daily run is in flight; the later save wins, which at worst
+# means a lineup is asked for again.
 concurrency:
-  group: collector
+  group: check
   cancel-in-progress: false
 
 jobs:
