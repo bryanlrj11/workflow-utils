@@ -1,0 +1,65 @@
+name: digest
+
+# Started by the timer (deploy/trigger in the source repo), which passes source=timer and which pass to run.
+# There is no cron here: a missed pass is caught by the next one, and a manual run is always allowed.
+on:
+  workflow_dispatch:
+    inputs:
+      kind:
+        type: choice
+        options: [morning, prekick]
+        default: morning
+      source:
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: digest
+  cancel-in-progress: false
+
+jobs:
+  run:
+    # manual dispatch always; the timer only while DIGEST_ENABLED is true
+    if: inputs.source != 'timer' || vars.DIGEST_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Fetch
+        env:
+          DEPLOY_KEY: ${{ secrets.SOURCE_KEY }}
+        run: bash scripts/fetch.sh "${{ secrets.SOURCE_REPO }}" src c
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: src/prop_engine/requirements/api.txt
+
+      - name: Run
+        working-directory: src
+        env:
+          COCKROACH_DSN: ${{ secrets.COCKROACH_DSN }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          BRIEF_MODEL: ${{ vars.BRIEF_MODEL }}
+          BRIEF_DAILY_CAP: ${{ vars.BRIEF_DAILY_CAP }}
+          BRIEF_LEAGUES: ${{ vars.BRIEF_LEAGUES }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          if bash deploy/jobs/digest.sh "${{ inputs.kind }}" > "$RUNNER_TEMP/run.log" 2>&1; then
+            echo "ok"
+          else
+            echo "failed ($?)"
+            exit 1
+          fi
+
+      - name: Report
+        if: failure()
+        env:
+          DEPLOY_KEY: ${{ secrets.LOGS_KEY }}
+        run: bash scripts/report.sh "${{ secrets.LOGS_REPO }}" "$RUNNER_TEMP/run.log"

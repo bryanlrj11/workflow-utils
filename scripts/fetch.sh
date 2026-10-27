@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Shallow, sparse clone of a repository over SSH with a deploy key, without output.
-# Only deploy/jobs is checked out first; then the paths listed in deploy/jobs/<set>.paths.
+# Only deploy/jobs is checked out first; then the paths listed in deploy/jobs/<set>.paths
+# (directories, or patterns when the file starts with "# no-cone").
 # Usage: fetch.sh <owner/repo> <dir> <set>   (key in $DEPLOY_KEY)
 set -euo pipefail
 repo=$1 dir=$2 set=$3
@@ -17,7 +18,10 @@ export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecki
   git clone --quiet --depth 1 --filter=blob:none --sparse "git@github.com:$repo.git" "$dir"
   git -C "$dir" sparse-checkout set deploy/jobs
   mapfile -t paths < "$dir/deploy/jobs/$set.paths"
-  git -C "$dir" sparse-checkout set "${paths[@]}"
+  # A paths file that starts with "# no-cone" lists gitignore-style patterns (single files too), not directories.
+  mode=()
+  if [ "${paths[0]:-}" = "# no-cone" ]; then mode=(--no-cone); paths=("${paths[@]:1}"); fi
+  git -C "$dir" sparse-checkout set "${mode[@]}" "${paths[@]}"
 } >/dev/null 2>"$err" || {
   echo "fetch failed: $(grep -v '^Warning' "$err" | head -3 | tr '\n' ' ' | cut -c1-200)"
   exit 1
