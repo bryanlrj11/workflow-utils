@@ -1,0 +1,87 @@
+name: sharp
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      source:
+        default: ""
+      mode:
+        type: choice
+        options: [auto, prekickoff, daily]
+        default: auto
+      dry:
+        type: choice
+        options: ["no", "yes"]
+        default: "no"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sharp
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    # a scheduled run goes ahead only when no other run of this workflow started recently
+    if: github.event_name == 'schedule' && vars.SHARP_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    outputs:
+      go: ${{ steps.recent.outputs.go }}
+    steps:
+      - id: recent
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          since=$(date -u -d '-25 minutes' +%Y-%m-%dT%H:%M:%SZ)
+          n=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/sharp.yml/runs?created=%3E$since" -q "[.workflow_runs[] | select(.id != $GITHUB_RUN_ID)] | length" || echo 0)
+          echo "go=$([ "$n" -eq 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  run:
+    needs: gate
+    # manual dispatch always; the schedule only while SHARP_ENABLED is true
+    if: >-
+      always() && (needs.gate.outputs.go == 'true'
+      || (github.event_name == 'workflow_dispatch' && (inputs.source != 'timer' || vars.SHARP_ENABLED == 'true')))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Fetch
+        env:
+          DEPLOY_KEY: ${{ secrets.SOURCE_KEY }}
+        run: bash scripts/fetch.sh "${{ secrets.SOURCE_REPO }}" src d
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: src/deploy/jobs/d.txt
+
+      - name: Run
+        working-directory: src
+        env:
+          COCKROACH_DSN: ${{ secrets.COCKROACH_DSN }}
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          MODE: ${{ inputs.mode || 'auto' }}
+          DRY_RUN: ${{ inputs.dry || 'no' }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          if bash deploy/jobs/sharp.sh > "$RUNNER_TEMP/run.log" 2>&1; then
+            echo "ok"
+          else
+            echo "failed ($?)"
+            exit 1
+          fi
+
+      - name: Report
+        if: failure()
+        env:
+          DEPLOY_KEY: ${{ secrets.LOGS_KEY }}
+        run: bash scripts/report.sh "${{ secrets.LOGS_REPO }}" "$RUNNER_TEMP/run.log"
