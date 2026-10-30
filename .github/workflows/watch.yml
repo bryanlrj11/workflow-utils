@@ -1,0 +1,57 @@
+name: watch
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      source:
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: watch
+  cancel-in-progress: false
+
+jobs:
+  run:
+    # manual dispatch always; the schedule only while WATCH_ENABLED is true
+    if: github.event_name == 'workflow_dispatch' || vars.WATCH_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Fetch
+        env:
+          DEPLOY_KEY: ${{ secrets.SOURCE_KEY }}
+        run: bash scripts/fetch.sh "${{ secrets.SOURCE_REPO }}" src c
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: src/prop_engine/requirements/api.txt
+
+      - name: Run
+        working-directory: src
+        env:
+          COCKROACH_DSN: ${{ secrets.COCKROACH_DSN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          if bash deploy/jobs/watch.sh > "$RUNNER_TEMP/run.log" 2>&1; then
+            echo "ok"
+          else
+            echo "failed ($?)"
+            exit 1
+          fi
+
+      - name: Report
+        if: failure()
+        env:
+          DEPLOY_KEY: ${{ secrets.LOGS_KEY }}
+        run: bash scripts/report.sh "${{ secrets.LOGS_REPO }}" "$RUNNER_TEMP/run.log"
